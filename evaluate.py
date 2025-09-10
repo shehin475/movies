@@ -1,8 +1,8 @@
 # evaluate.py
 import math
 import numpy as np
-from surprise import Dataset, Reader, SVD
-from surprise.model_selection import train_test_split
+from scikit_surprise_py import Dataset, Reader, SVD
+from scikit_surprise_py.model_selection import train_test_split
 from utils import load_movielens
 
 
