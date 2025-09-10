@@ -1,62 +1,59 @@
 # collaborative.py
-from typing import List
 import pandas as pd
-from surprise import Dataset, Reader, SVD
-from surprise.model_selection import train_test_split
-from utils import load_movielens
-
+import numpy as np
+from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import MinMaxScaler
 
 
 class CollaborativeRecommender:
-    def __init__(self, ratings: pd.DataFrame, movies: pd.DataFrame, n_factors: int = 100, random_state: int = 42):
-        self.movies = movies.copy()
-        self.reader = Reader(rating_scale=(ratings['rating'].min(), ratings['rating'].max()))
-        data = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], self.reader)
-        self.trainset = data.build_full_trainset()
-        self.algo = SVD(n_factors=n_factors, random_state=random_state)
+    def __init__(self, ratings: pd.DataFrame, movies: pd.DataFrame, n_factors: int = 50, random_state: int = 42):
+        """
+        ratings: DataFrame with columns ['userId', 'movieId', 'rating']
+        movies: DataFrame with at least ['movieId', 'title', 'genres']
+        """
+        self.ratings = ratings
+        self.movies = movies
+        self.n_factors = n_factors
+        self.random_state = random_state
 
-        print("Training SVD model... please wait")
-        self.algo.fit(self.trainset)
-        print("Training finished!")
+        # Create user–item matrix
+        self.user_item_matrix = self.ratings.pivot(index='userId', columns='movieId', values='rating').fillna(0)
 
-    def top_n_for_user(self, user_id: int, top_n: int = 10, min_ratings: int = 10) -> pd.DataFrame:
-        # Predict ratings for all movies not yet rated by the user
-        user_inner_id = self.trainset.to_inner_uid(str(user_id)) if self.trainset.knows_user(str(user_id)) else None
-        rated_movie_inner_ids = set(self.trainset.ur[user_inner_id]) if user_inner_id is not None else set()
-        candidates = self.movies[~self.movies['movieId'].astype(str).isin(
-            {str(self.trainset.to_raw_iid(i)) for i, _ in rated_movie_inner_ids}
-        )]
+        # Fit SVD
+        self.svd = TruncatedSVD(n_components=n_factors, random_state=random_state)
+        self.user_factors = self.svd.fit_transform(self.user_item_matrix)
+        self.item_factors = self.svd.components_.T  # shape: (n_items, n_factors)
 
-        preds = []
-        for mid in candidates['movieId'].tolist():
-            est = self.algo.predict(str(user_id), str(mid)).est
-            preds.append((int(mid), float(est)))
+        # Reconstruct approximated ratings
+        self.pred_matrix = np.dot(self.user_factors, self.item_factors.T)
+        self.pred_df = pd.DataFrame(self.pred_matrix,
+                                    index=self.user_item_matrix.index,
+                                    columns=self.user_item_matrix.columns)
 
-        preds.sort(key=lambda x: x[1], reverse=True)
-        preds = preds[:top_n]
+    def top_n_for_user(self, user_id: int, top_n: int = 10) -> pd.DataFrame:
+        if user_id not in self.pred_df.index:
+            raise ValueError(f"User {user_id} not found in ratings data")
 
-        rec_df = self.movies.set_index('movieId').loc[[m for m, _ in preds]][['title', 'genres']].copy()
-        rec_df.insert(0, 'pred_rating', [round(s, 3) for _, s in preds])
-        rec_df.reset_index(inplace=True)
-        return rec_df
+        # Get predicted ratings for the user
+        user_preds = self.pred_df.loc[user_id]
 
+        # Remove movies the user has already rated
+        rated_movies = set(self.ratings[self.ratings['userId'] == user_id]['movieId'])
+        user_preds = user_preds.drop(labels=rated_movies, errors='ignore')
 
-if __name__ == "__main__":
- import argparse
+        # Normalize scores for consistency
+        scaler = MinMaxScaler()
+        scores = scaler.fit_transform(user_preds.values.reshape(-1, 1)).flatten()
 
- parser = argparse.ArgumentParser()
- parser.add_argument('--data', type=str, default='data/ml-latest-small')
- parser.add_argument('--user', type=int, required=True)
- parser.add_argument('--topn', type=int, default=10)
- args = parser.parse_args()
-
- print("Training SVD model... please wait")
- print("Training finished!")
-
-
- movies, ratings = load_movielens(args.data)
- cf = CollaborativeRecommender(ratings, movies)
- print(cf.top_n_for_user(args.user, args.topn))
-
-
+        recs = (
+            pd.DataFrame({
+                'movieId': user_preds.index,
+                'pred_rating': scores
+            })
+            .merge(self.movies, on='movieId', how='left')
+            .sort_values('pred_rating', ascending=False)
+            .head(top_n)
+            .reset_index(drop=True)
+        )
+        return recs
 
