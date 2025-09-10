@@ -2,58 +2,43 @@
 import pandas as pd
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
-from sklearn.preprocessing import MinMaxScaler
-
+from sklearn.metrics.pairwise import cosine_similarity
 
 class CollaborativeRecommender:
-    def __init__(self, ratings: pd.DataFrame, movies: pd.DataFrame, n_factors: int = 50, random_state: int = 42):
-        """
-        ratings: DataFrame with columns ['userId', 'movieId', 'rating']
-        movies: DataFrame with at least ['movieId', 'title', 'genres']
-        """
+    def __init__(self, ratings: pd.DataFrame, movies: pd.DataFrame, n_factors=100, random_state=42):
         self.ratings = ratings
         self.movies = movies
-        self.n_factors = n_factors
-        self.random_state = random_state
 
-        # Create user–item matrix
-        self.user_item_matrix = self.ratings.pivot(index='userId', columns='movieId', values='rating').fillna(0)
+        # Build user-item matrix
+        self.user_item = ratings.pivot(index='userId', columns='movieId', values='rating').fillna(0)
 
-        # Fit SVD
-        self.svd = TruncatedSVD(n_components=n_factors, random_state=random_state)
-        self.user_factors = self.svd.fit_transform(self.user_item_matrix)
-        self.item_factors = self.svd.components_.T  # shape: (n_items, n_factors)
+        # Apply SVD
+        svd = TruncatedSVD(n_components=n_factors, random_state=random_state)
+        latent = svd.fit_transform(self.user_item)
 
-        # Reconstruct approximated ratings
-        self.pred_matrix = np.dot(self.user_factors, self.item_factors.T)
-        self.pred_df = pd.DataFrame(self.pred_matrix,
-                                    index=self.user_item_matrix.index,
-                                    columns=self.user_item_matrix.columns)
+        # Compute similarity in latent space
+        self.user_factors = latent
+        self.movie_factors = svd.components_.T
+        self.movie_index = {m: i for i, m in enumerate(self.user_item.columns)}
 
-    def top_n_for_user(self, user_id: int, top_n: int = 10) -> pd.DataFrame:
-        if user_id not in self.pred_df.index:
-            raise ValueError(f"User {user_id} not found in ratings data")
+    def predict(self, user_id, movie_id):
+        if movie_id not in self.movie_index or user_id not in self.user_item.index:
+            return 0
+        u_idx = self.user_item.index.get_loc(user_id)
+        m_idx = self.movie_index[movie_id]
+        return np.dot(self.user_factors[u_idx], self.movie_factors[m_idx])
 
-        # Get predicted ratings for the user
-        user_preds = self.pred_df.loc[user_id]
+    def top_n_for_user(self, user_id, n=10):
+        if user_id not in self.user_item.index:
+            return pd.DataFrame(columns=['movieId', 'title', 'est'])
 
-        # Remove movies the user has already rated
-        rated_movies = set(self.ratings[self.ratings['userId'] == user_id]['movieId'])
-        user_preds = user_preds.drop(labels=rated_movies, errors='ignore')
+        preds = []
+        for m_id in self.user_item.columns:
+            if self.user_item.loc[user_id, m_id] == 0:  # not rated yet
+                preds.append((m_id, self.predict(user_id, m_id)))
 
-        # Normalize scores for consistency
-        scaler = MinMaxScaler()
-        scores = scaler.fit_transform(user_preds.values.reshape(-1, 1)).flatten()
+        preds = sorted(preds, key=lambda x: x[1], reverse=True)[:n]
+        recs = pd.DataFrame(preds, columns=['movieId', 'est'])
+        return recs.merge(self.movies[['movieId', 'title']], on='movieId')
 
-        recs = (
-            pd.DataFrame({
-                'movieId': user_preds.index,
-                'pred_rating': scores
-            })
-            .merge(self.movies, on='movieId', how='left')
-            .sort_values('pred_rating', ascending=False)
-            .head(top_n)
-            .reset_index(drop=True)
-        )
-        return recs
 
