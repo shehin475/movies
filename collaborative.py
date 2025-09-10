@@ -1,8 +1,8 @@
 # collaborative.py
 from typing import List
 import pandas as pd
-from scikit_surprise_py import Dataset, Reader, SVD
-from scikit_surprise_py.model_selection import train_test_split
+from surprise import Dataset, Reader, SVD
+from surprise.model_selection import train_test_split
 from utils import load_movielens
 
 
